@@ -4,7 +4,7 @@
 ![](./doc/func.png)
 
 ## Directory Structure
-- `simulate`: Simulator implemented based on unitree_sdk2 and mujoco (C++)
+- `simulate`: Simulator implemented based on unitree_sdk2 and mujoco (C++, recommended)
 - `simulate_python`: Simulator implemented based on unitree_sdk2_python and mujoco (Python)
 - `unitree_robots`: MJCF description files for robots supported by unitree_sdk2
 - `terrain_tool`: Tool for generating terrain in simulation scenarios
@@ -29,12 +29,17 @@ Note:
 
 ## Message (DDS idl) type description
 - Unitree Go2, B2, H1, B2w, Go2w robots use unitree_go idl for low-level communication.
-- Unitree G1 robot uses unitree_hg idl for low-level communication.
+- Unitree G1, H1-2 robot uses unitree_hg idl for low-level communication.
 
 
 # Installation
 ## C++ Simulator (simulate)
 ### 1. Dependencies
+
+```bash
+sudo apt install libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev
+```
+
 #### unitree_sdk2
 It is recommended to install `unitree_sdk2` in `/opt/unitree_robotics` path.
 ```bash
@@ -47,27 +52,14 @@ sudo make install
 ```
 For more details, see: https://github.com/unitreerobotics/unitree_sdk2
 #### mujoco
-Current version is tested in mujoco-3.2.7
-```bash
-sudo apt install libglfw3-dev libxinerama-dev libxcursor-dev libxi-dev
+
+Download the mujoco [release](https://github.com/google-deepmind/mujoco/releases), and extract it to the `~/.mujoco` directory;
+
 ```
-```bash
-git clone https://github.com/google-deepmind/mujoco.git
-mkdir build && cd build
-cmake ..
-make -j4
-sudo make install
+cd unitree_mujoco/simulate/
+ln -s ~/.mujoco/mujoco-3.3.6 mujoco
 ```
-Test:
-```bash
-simulate
-```
-If the mujoco simulator pops up, the installation is successful.
-#### yaml-cpp
-yaml-cpp is mainly used for reading configuration files:
-```bash
-sudo apt install libyaml-cpp-dev
-```
+
 ### 2. Compile unitree_mujoco
 ```bash
 cd unitree_mujoco/simulate
@@ -78,7 +70,7 @@ make -j4
 ### 3. Test:
 Run:
 ```bash
-./unitree_mujoco
+./unitree_mujoco -r go2 -s scene_terrain.xml
 ```
 You should see the mujoco simulator with the Go2 robot loaded.
 In a new terminal, run:

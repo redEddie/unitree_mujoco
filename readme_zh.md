@@ -6,7 +6,7 @@
 ![](./doc/func.png)
 
 ## 目录结构
-- `simulate`: 基于 unitree_sdk2 和 mujoco (c++) 实现的仿真器
+- `simulate`: 基于 unitree_sdk2 和 mujoco (c++) 实现的仿真器（推荐）
 - `simulate_python`: 基于 unitree_sdk2py 和 mujoco (python) 实现的仿真器
 - `unitree_robots`: unitree_sdk2 支持的机器人 mjcf 描述文件
 - `terrain_tool`: 仿真场景地形生成工具
@@ -20,7 +20,7 @@
 
 ## 消息(DDS idl)类型说明
 - Unitree Go2, B2, H1, B2w, Go2w 型号的机器人使用 unitree_go idl 实现底层通信
-- Unitree G1 型号的机器人使用 unitree_hg 实现底层通信
+- Unitree G1, H1-2 型号的机器人使用 unitree_hg 实现底层通信
 
 注：
  1. 电机的编号与机器人实物一致，具体可参考 [Unitree 文档](https://support.unitree.com/home/zh/developer)
@@ -36,6 +36,11 @@
 # 安装
 ## c++ 仿真器 (simulate)
 ### 1. 依赖
+
+```bash
+sudo apt install libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev
+```
+
 #### unitree_sdk2
 推荐将 `unitree_sdk2` 安装在 `/opt/unitree_robotics` 路径下。
 ```bash
@@ -48,32 +53,17 @@ sudo make install
 ```
 详细见：https://github.com/unitreerobotics/unitree_sdk2
 #### mujoco
-当前版本基于 mujoco-3.2.7 测试
-```bash
-sudo apt install libglfw3-dev libxinerama-dev libxcursor-dev libxi-dev
-```
-```bash
-git clone https://github.com/google-deepmind/mujoco.git
-mkdir build && cd build
-cmake ..
-make -j4
-sudo make install
-```
-测试:
-```bash
-simulate
-```
-弹出 mujoco 仿真器表示安装成功。
 
-#### yaml-cpp
-yaml-cpp主要用于配置文件的读取：
+下载mujoco[安装包](https://github.com/google-deepmind/mujoco/releases), 解压到 `~/.mujoco` 目录下;
+
 ```
-sudo apt install libyaml-cpp-dev
+cd unitree_mujoco/simulate/
+ln -s ~/.mujoco/mujoco-3.3.6 mujoco
 ```
 
 ### 2. 编译 unitree_mujoco
 ```
-cd simulate/
+cd unitree_mujoco/simulate/
 mkdir build && cd build
 cmake ..
 make -j4
@@ -82,7 +72,7 @@ make -j4
 ### 3. 测试:
 运行：
 ```bash
-./unitree_mujoco
+./unitree_mujoco -r go2 -s scene_terrain.xml
 ```
 可以看到加载了 Go2 机器人的 mujoco 仿真器。
 
@@ -297,10 +287,10 @@ python3 ./stand_go2.py enp3s0 # 控制机器人实物，其中 enp3s0 为机器�
 ```python
 if len(sys.argv) <2:
     // 如果没有输入网卡，使用仿真的 domian id 和 网卡(本地)
-    ChannelFactortyInitialize(1, "lo")
+    ChannelFactoryInitialize(1, "lo")
 else:
     // 否则使用指定的网卡
-    ChannelFactortyInitialize(0, sys.argv[1])
+    ChannelFactoryInitialize(0, sys.argv[1])
 ```
 ### unitree_ros2
 
