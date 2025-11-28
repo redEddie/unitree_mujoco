@@ -376,25 +376,63 @@ _node_instance = None
 
 def cleanup_handler(signum=None, frame=None):
     global _node_instance
-    
+
     print("\n🧹 Shutting down SportModeState full bridge...")
-    
+
     if _node_instance:
+        # Clean up DDS subscriber
+        try:
+            if hasattr(_node_instance, 'sportmode_sub') and _node_instance.sportmode_sub:
+                # Delete subscriber reference to release DDS resources
+                del _node_instance.sportmode_sub
+                _node_instance.sportmode_sub = None
+                print("✓ DDS subscriber cleaned up")
+        except Exception as e:
+            print(f"⚠️  Warning: DDS cleanup error: {e}")
+
+        # Clean up ROS2 publishers
+        try:
+            publishers = [
+                'pub_full', 'pub_state_json', 'pub_error_code', 'pub_mode',
+                'pub_gait_type', 'pub_position', 'pub_velocity', 'pub_imu_quat',
+                'pub_imu_gyro', 'pub_imu_acc', 'pub_foot_force',
+                'pub_foot_pos_body', 'pub_foot_speed_body'
+            ]
+            for pub_name in publishers:
+                if hasattr(_node_instance, pub_name):
+                    pub = getattr(_node_instance, pub_name)
+                    if pub:
+                        _node_instance.destroy_publisher(pub)
+            print("✓ ROS2 publishers destroyed")
+        except Exception as e:
+            print(f"⚠️  Warning: Publisher cleanup error: {e}")
+
+        # Clean up timer
+        try:
+            if hasattr(_node_instance, 'stat_timer') and _node_instance.stat_timer:
+                _node_instance.stat_timer.cancel()
+                _node_instance.destroy_timer(_node_instance.stat_timer)
+                print("✓ Timer destroyed")
+        except Exception as e:
+            print(f"⚠️  Warning: Timer cleanup error: {e}")
+
+        # Destroy node
         try:
             _node_instance.destroy_node()
             print("✓ Node destroyed")
-        except:
-            pass
-    
+        except Exception as e:
+            print(f"⚠️  Warning: Node destruction error: {e}")
+
+    # Shutdown ROS2
     try:
         if rclpy.ok():
             rclpy.shutdown()
             print("✓ ROS2 shutdown")
-    except:
-        pass
-    
+    except Exception as e:
+        print(f"⚠️  Warning: ROS2 shutdown error: {e}")
+
     print("✓ Shutdown complete\n")
-    
+
     if signum is not None:
         sys.exit(0)
 
@@ -409,29 +447,33 @@ atexit.register(cleanup_handler)
 
 def main(args=None):
     global _node_instance
-    
+
     print("\n" + "=" * 70)
     print("Unitree SportModeState FULL Bridge to ROS2")
     print("=" * 70)
     print("Press Ctrl+C to stop")
     print("=" * 70 + "\n")
-    
+
     try:
         rclpy.init(args=args)
         node = SportModeStateFullPublisher()
         _node_instance = node
         rclpy.spin(node)
         return 0
-    
+
     except KeyboardInterrupt:
         print("\n🛑 Interrupted")
         return 0
-    
+
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
         traceback.print_exc()
         return 1
+
+    finally:
+        # Ensure cleanup is always called
+        cleanup_handler()
 
 
 if __name__ == "__main__":

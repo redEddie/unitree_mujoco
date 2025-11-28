@@ -687,7 +687,7 @@ class IsaacLabPolicyRunnerROS2:
         # Set initial velocity commands (all zeros initially)
         # For heading mode: (vx=0.0 m/s, vy=0.0, target_heading=0.0 rad)
         # For relative mode: (vx=0.0 m/s, vy=0.0, wz=0.0 rad/s)
-        self.obs_processor.set_velocity_commands(0.0, 0.0, -1.0)
+        self.obs_processor.set_velocity_commands(0.0, 0.0, 0.0)
         
         start_time = time.time()
         step_count = 0
@@ -817,7 +817,7 @@ def main(args=None):
     
     # Configuration
     config = PolicyConfig()
-    policy_path = "/home/jeonchanwook/unitree_mujoco/example/python/exported/policy.onnx"
+    policy_path = "/home/user/unitree_mujoco/example/python/exported/policy.onnx"
     
     print("\nWARNING: Ensure robot area is clear!")
     print("ROS2 topics available for PlotJuggler:")
@@ -839,17 +839,66 @@ def main(args=None):
     print("Note: Run ros2_bridge_sportmodestate.py separately if you need ROS2 bridge topics")
     input("\nPress Enter to start...")
     
+    runner = None
     try:
         runner = IsaacLabPolicyRunnerROS2(policy_path, config, ros_node)
         runner.run(duration=30.0, enable_noise=True)
-        
+
     except Exception as e:
         ros_node.get_logger().error(f'Error: {e}')
         return 1
-    
+
     finally:
-        ros_node.destroy_node()
-        rclpy.shutdown()
+        # Clean up DDS resources
+        if runner:
+            try:
+                # Clean up DDS subscribers
+                if hasattr(runner, 'state_sub') and runner.state_sub:
+                    del runner.state_sub
+                    runner.state_sub = None
+                if hasattr(runner, 'sportmode_sub') and runner.sportmode_sub:
+                    del runner.sportmode_sub
+                    runner.sportmode_sub = None
+                # Clean up DDS publisher
+                if hasattr(runner, 'cmd_pub') and runner.cmd_pub:
+                    del runner.cmd_pub
+                    runner.cmd_pub = None
+                print("✓ DDS channels cleaned up")
+            except Exception as e:
+                print(f"⚠️  Warning: DDS cleanup error: {e}")
+
+        # Clean up ROS2 node and publishers
+        try:
+            # Destroy all publishers
+            publishers = [
+                'pub_base_lin_vel', 'pub_base_ang_vel', 'pub_projected_gravity',
+                'pub_velocity_commands', 'pub_joint_states', 'pub_actions',
+                'pub_actions_scaled', 'pub_target_positions', 'pub_computed_torques',
+                'pub_full_obs', 'pub_inference_time', 'pub_loop_time',
+                'pub_current_heading', 'pub_target_heading', 'pub_heading_error'
+            ]
+            for pub_name in publishers:
+                if hasattr(ros_node, pub_name):
+                    pub = getattr(ros_node, pub_name)
+                    if pub:
+                        ros_node.destroy_publisher(pub)
+            print("✓ ROS2 publishers destroyed")
+        except Exception as e:
+            print(f"⚠️  Warning: Publisher cleanup error: {e}")
+
+        # Destroy ROS2 node
+        try:
+            ros_node.destroy_node()
+            print("✓ ROS2 node destroyed")
+        except Exception as e:
+            print(f"⚠️  Warning: Node destruction error: {e}")
+
+        # Shutdown ROS2
+        try:
+            rclpy.shutdown()
+            print("✓ ROS2 shutdown complete")
+        except Exception as e:
+            print(f"⚠️  Warning: ROS2 shutdown error: {e}")
     
     return 0
 
