@@ -28,6 +28,13 @@ import sys
 import numpy as np
 import onnxruntime as ort
 from typing import Optional, Tuple
+import threading
+from collections import deque
+
+# Configure matplotlib for thread safety
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
 
 import rclpy
 from rclpy.node import Node
@@ -96,6 +103,80 @@ class PolicyConfig:
     
     OBS_CLIP = 100.0
     ACTION_CLIP = 23.5  # effort limit
+
+# =============================================================================
+# IMU Plotter (Minimal)
+# =============================================================================
+
+class IMUPlotter:
+    """Real-time IMU vs Ground Truth plotting"""
+
+    def __init__(self, window_size: int = 200):
+        self.window_size = window_size
+        self.timestamps = deque(maxlen=window_size)
+        self.imu_acc_x = deque(maxlen=window_size)
+        self.imu_acc_y = deque(maxlen=window_size)
+        self.imu_acc_z = deque(maxlen=window_size)
+        self.gt_acc_x = deque(maxlen=window_size)
+        self.gt_acc_y = deque(maxlen=window_size)
+        self.gt_acc_z = deque(maxlen=window_size)
+        self.lock = threading.Lock()
+        self.running = False
+
+    def add_data(self, timestamp: float, imu_acc: np.ndarray, gt_acc: np.ndarray):
+        with self.lock:
+            self.timestamps.append(timestamp)
+            self.imu_acc_x.append(imu_acc[0])
+            self.imu_acc_y.append(imu_acc[1])
+            self.imu_acc_z.append(imu_acc[2])
+            self.gt_acc_x.append(gt_acc[0])
+            self.gt_acc_y.append(gt_acc[1])
+            self.gt_acc_z.append(gt_acc[2])
+
+    def start(self):
+        self.running = True
+        self.plot_thread = threading.Thread(target=self._plot_loop, daemon=True)
+        self.plot_thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def _plot_loop(self):
+        plt.ion()
+        fig, axes = plt.subplots(3, 1, figsize=(12, 8))
+        fig.suptitle('IMU vs Ground Truth Acceleration', fontweight='bold')
+
+        lines_imu = []
+        lines_gt = []
+        for i, (ax, name, color_imu, color_gt) in enumerate(zip(
+            axes, ['X (Forward)', 'Y (Left)', 'Z (Up)'],
+            ['r', 'g', 'b'], ['darkred', 'darkgreen', 'darkblue'])):
+            ax.set_title(f'{name} Acceleration')
+            ax.set_ylabel('Acc (m/s²)')
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(-15, 15)
+            line_imu, = ax.plot([], [], color_imu, linewidth=2, label='IMU')
+            line_gt, = ax.plot([], [], color_gt, linewidth=2, linestyle='--', label='GT')
+            ax.legend()
+            lines_imu.append(line_imu)
+            lines_gt.append(line_gt)
+
+        plt.tight_layout()
+
+        while self.running:
+            with self.lock:
+                if len(self.timestamps) > 1:
+                    t = np.array(self.timestamps)
+                    lines_imu[0].set_data(t, np.array(self.imu_acc_x))
+                    lines_gt[0].set_data(t, np.array(self.gt_acc_x))
+                    lines_imu[1].set_data(t, np.array(self.imu_acc_y))
+                    lines_gt[1].set_data(t, np.array(self.gt_acc_y))
+                    lines_imu[2].set_data(t, np.array(self.imu_acc_z))
+                    lines_gt[2].set_data(t, np.array(self.gt_acc_z))
+                    for ax in axes:
+                        ax.set_xlim(t[0], t[-1])
+            plt.pause(0.05)
+        plt.close(fig)
 
 # =============================================================================
 # ROS2 Diagnostics Node
@@ -268,25 +349,31 @@ class Go2DiagnosticsPublisher(Node):
 
 class ObservationProcessor:
     """Processes raw sensor data into policy observations with joint reordering"""
-    
-    def __init__(self, config: PolicyConfig):
+
+    def __init__(self, config: PolicyConfig, imu_plotter: Optional[IMUPlotter] = None):
         self.config = config
         # last_actions는 IsaacLab 순서로 저장됨
         self.last_actions = np.zeros(12, dtype=np.float32)
-        
+
         # Store latest velocity from SportModeState
         self.latest_base_velocity = np.zeros(3, dtype=np.float32)
-        
+
+        # IMU plotting
+        self.imu_plotter = imu_plotter
+        self.prev_velocity = None
+        self.prev_velocity_time = None
+        self.start_time = None
+
         # Velocity command configuration (matching IsaacLab pattern)
         self.heading_command = True  # 학습 시 설정과 동일하게 (absolute heading mode)
         self.heading_control_stiffness = 0.5  # IsaacLab default value
-        
+
         # Input velocity commands [vx, vy, yaw] - what user provides
         self.velocity_commands = np.zeros(3, dtype=np.float32)  # [vx, vy, yaw_target or yaw_rate]
-        
+
         # Processed velocity commands [vx, vy, wz] - what robot actually uses and goes to policy
         self.vel_command_b = np.zeros(3, dtype=np.float32)  # processed velocity commands
-        
+
         # Heading control state (for absolute heading mode)
         self.heading_target = 0.0      # target heading (radians)
     
@@ -296,12 +383,35 @@ class ObservationProcessor:
         
     def process(self, lowstate: LowState_, add_noise: bool = True) -> Tuple[np.ndarray, dict]:
         """Process raw sensor data and return observation + components dict
-        
-        CRITICAL: 
+
+        CRITICAL:
         - MuJoCo의 joint data를 받아서 IsaacLab 순서로 변환
         - Policy에 IsaacLab 순서의 observation 입력
         """
-        
+
+        # IMU plotting (does NOT affect policy observation)
+        if self.imu_plotter:
+            if self.start_time is None:
+                self.start_time = time.time()
+            current_time = time.time() - self.start_time
+
+            # Get IMU accelerometer
+            imu_acc = np.array(lowstate.imu_state.accelerometer, dtype=np.float32)
+
+            # Compute GT acceleration from velocity differentiation
+            if self.prev_velocity is not None and self.prev_velocity_time is not None:
+                dt = current_time - self.prev_velocity_time
+                if 0 < dt < 0.1:
+                    gt_acc = (self.latest_base_velocity - self.prev_velocity) / dt
+                else:
+                    gt_acc = np.zeros(3, dtype=np.float32)
+            else:
+                gt_acc = np.zeros(3, dtype=np.float32)
+
+            self.imu_plotter.add_data(current_time, imu_acc, gt_acc)
+            self.prev_velocity = self.latest_base_velocity.copy()
+            self.prev_velocity_time = current_time
+
         # Use base velocity from bridge (SportModeState)
         base_lin_vel = self.latest_base_velocity.copy()
         
@@ -818,7 +928,14 @@ def main(args=None):
     # Configuration
     config = PolicyConfig()
     policy_path = "/home/user/unitree_mujoco/example/python/exported/policy.onnx"
-    
+
+    # Start IMU plotter
+    print("\n✓ Starting IMU comparison plotter...")
+    imu_plotter = IMUPlotter(window_size=200)
+    imu_plotter.start()
+    time.sleep(0.5)  # Give plotter time to initialize
+    print("✓ IMU plot window should be visible")
+
     print("\nWARNING: Ensure robot area is clear!")
     print("ROS2 topics available for PlotJuggler:")
     print("  Policy Observations:")
@@ -842,6 +959,11 @@ def main(args=None):
     runner = None
     try:
         runner = IsaacLabPolicyRunnerROS2(policy_path, config, ros_node)
+
+        # Connect IMU plotter (does NOT affect policy, only for visualization)
+        runner.obs_processor.imu_plotter = imu_plotter
+        print("✓ IMU plotter connected to observation processor")
+
         runner.run(duration=30.0, enable_noise=True)
 
     except Exception as e:
@@ -849,6 +971,14 @@ def main(args=None):
         return 1
 
     finally:
+        # Stop plotter
+        try:
+            imu_plotter.stop()
+            print("✓ IMU plotter stopped")
+        except:
+            pass
+
+        # Clean up DDS and ROS2 (original cleanup)
         # Clean up DDS resources
         if runner:
             try:
