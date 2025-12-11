@@ -12,15 +12,19 @@ from utils.config import PolicyConfig, UNITREE_TO_ISAACLAB
 class ObservationProcessor:
     """Processes raw sensor data into policy observations with joint reordering"""
 
-    def __init__(self, config: PolicyConfig, ros_node=None):
+    def __init__(self, config: PolicyConfig, ros_node=None, obs_layout: str = "flat"):
         """
         Initialize observation processor
 
         Args:
             config: Policy configuration
             ros_node: Optional ROS2 node for publishing IMU data
+            obs_layout: Observation layout. Supported:
+                - 'flat': 48-dim layout with base_lin_vel (SportModeState or estimator)
+                - 'acc':  48-dim layout using IMU specific force as base_lin_acc
         """
         self.config = config
+        self.obs_layout = obs_layout
         # last_actions는 IsaacLab 순서로 저장됨
         self.last_actions = np.zeros(12, dtype=np.float32)
 
@@ -63,11 +67,18 @@ class ObservationProcessor:
         - Policy에 IsaacLab 순서의 observation 입력
         """
 
-        # Use base velocity from bridge (SportModeState)
+        # Use base velocity from bridge (SportModeState) or estimator
         base_lin_vel = self.latest_base_velocity.copy()
 
-        # Get angular velocity from IMU
+        # Get angular velocity / linear acceleration from IMU
         base_ang_vel = np.array(lowstate.imu_state.gyroscope, dtype=np.float32)
+        imu_ang_vel = base_ang_vel.copy()
+        imu_acc_raw = np.array(lowstate.imu_state.accelerometer, dtype=np.float32)
+
+        imu_lin_acc = imu_acc_raw.copy()
+
+        # Base linear acceleration (specific force) used in acc layout
+        base_lin_acc = imu_acc_raw.copy()
 
         # Projected gravity and current orientation
         quat = np.array(lowstate.imu_state.quaternion, dtype=np.float32)
@@ -83,7 +94,7 @@ class ObservationProcessor:
                 self.imu_counter = 0
 
                 # Get raw IMU accelerometer
-                imu_acc = np.array(lowstate.imu_state.accelerometer, dtype=np.float32)
+                imu_acc = imu_acc_raw.copy()
 
                 # Publish raw data only (no computation in control loop!)
                 self.ros_node.publish_imu_data(imu_acc, self.latest_base_velocity,
@@ -110,33 +121,54 @@ class ObservationProcessor:
 
         # Store clean observations before noise (모두 IsaacLab 순서)
         obs_clean = {
-            'base_lin_vel': base_lin_vel.copy(),
             'base_ang_vel': base_ang_vel.copy(),
+            'base_lin_vel': base_lin_vel.copy(),
             'projected_gravity': projected_gravity.copy(),
             'velocity_commands': self.vel_command_b.copy(),
             'joint_pos': joint_pos_rel.copy(),
             'joint_vel': joint_vel.copy(),
-            'last_actions': self.last_actions.copy()
+            'last_actions': self.last_actions.copy(),
+            'imu_ang_vel': imu_ang_vel.copy(),
+            'imu_lin_acc': imu_lin_acc.copy()
         }
+        if self.obs_layout == "acc":
+            obs_clean['base_lin_acc'] = base_lin_acc.copy()
 
         # Add noise if enabled
         if add_noise:
             base_lin_vel += self._add_noise(base_lin_vel, 'base_lin_vel')
             base_ang_vel += self._add_noise(base_ang_vel, 'base_ang_vel')
+            imu_ang_vel += self._add_noise(imu_ang_vel, 'imu_ang_vel')
+            if self.obs_layout == "acc":
+                base_lin_acc += self._add_noise(base_lin_acc, 'base_lin_acc')
+            imu_lin_acc += self._add_noise(imu_lin_acc, 'imu_lin_acc')
             projected_gravity += self._add_noise(projected_gravity, 'projected_gravity')
             joint_pos_rel += self._add_noise(joint_pos_rel, 'joint_pos')
             joint_vel += self._add_noise(joint_vel, 'joint_vel')
 
-        # Concatenate observation (모두 IsaacLab 순서)
-        obs = np.concatenate([
-            base_lin_vel,
-            base_ang_vel,
-            projected_gravity,
-            self.vel_command_b,
-            joint_pos_rel,
-            joint_vel,
-            self.last_actions
-        ]).astype(np.float32)
+        # Select observation layout
+        if self.obs_layout == "acc":
+            obs_components = [
+                base_lin_acc,
+                base_ang_vel,
+                projected_gravity,
+                self.vel_command_b,
+                joint_pos_rel,
+                joint_vel,
+                self.last_actions
+            ]
+        else:  # Default: flat (base_lin_vel)
+            obs_components = [
+                base_lin_vel,
+                base_ang_vel,
+                projected_gravity,
+                self.vel_command_b,
+                joint_pos_rel,
+                joint_vel,
+                self.last_actions
+            ]
+
+        obs = np.concatenate(obs_components).astype(np.float32)
 
         # Clip observations
         obs = np.clip(obs, -self.config.OBS_CLIP, self.config.OBS_CLIP)
@@ -145,18 +177,31 @@ class ObservationProcessor:
         obs_clean['full_obs'] = obs
 
         # Debug: log observation statistics every 100 steps
-        if self.process_count % 100 == 0 and self.process_count > 0:
+        if self.process_count % 25 == 0 and self.process_count > 0:
             avg_imu_time = self.imu_publish_time_total / self.process_count
-            print(f"\n[DEBUG] Step {self.process_count} - Observation Stats:")
-            print(f"  IMU ROS2 publish enabled: {self.ros_node is not None}")
-            print(f"  Avg IMU publish time: {avg_imu_time:.4f} ms")
-            print(f"  Base lin vel: [{base_lin_vel[0]:.3f}, {base_lin_vel[1]:.3f}, {base_lin_vel[2]:.3f}]")
-            print(f"  Base ang vel: [{base_ang_vel[0]:.3f}, {base_ang_vel[1]:.3f}, {base_ang_vel[2]:.3f}]")
-            print(f"  Projected gravity: [{projected_gravity[0]:.3f}, {projected_gravity[1]:.3f}, {projected_gravity[2]:.3f}]")
-            print(f"  Velocity commands: [{self.vel_command_b[0]:.3f}, {self.vel_command_b[1]:.3f}, {self.vel_command_b[2]:.3f}]")
-            print(f"  Joint pos (first 3): [{joint_pos_rel[0]:.3f}, {joint_pos_rel[1]:.3f}, {joint_pos_rel[2]:.3f}]")
-            print(f"  Joint vel (first 3): [{joint_vel[0]:.3f}, {joint_vel[1]:.3f}, {joint_vel[2]:.3f}]")
-            print(f"  Last actions (first 3): [{self.last_actions[0]:.3f}, {self.last_actions[1]:.3f}, {self.last_actions[2]:.3f}]")
+            print(f"\n[DEBUG] Step {self.process_count} - Observation Stats")
+            print("  " + "-" * 52)
+            print(f"  {'IMU ROS2 enabled':<22}: {self.ros_node is not None}")
+            print(f"  {'Avg IMU pub time':<22}: {avg_imu_time:8.4f} ms")
+            print(f"  {'Base ang vel':<22}: "
+                  f"[{base_ang_vel[0]:+7.3f}, {base_ang_vel[1]:+7.3f}, {base_ang_vel[2]:+7.3f}]")
+            print(f"  {'Proj gravity':<22}: "
+                  f"[{projected_gravity[0]:+7.3f}, {projected_gravity[1]:+7.3f}, {projected_gravity[2]:+7.3f}]")
+            print(f"  {'Vel commands (b)':<22}: "
+                  f"[{self.vel_command_b[0]:+7.3f}, {self.vel_command_b[1]:+7.3f}, {self.vel_command_b[2]:+7.3f}]")
+            print(f"  {'Joint pos (first 3)':<22}: "
+                  f"[{joint_pos_rel[0]:+7.3f}, {joint_pos_rel[1]:+7.3f}, {joint_pos_rel[2]:+7.3f}]")
+            print(f"  {'Joint vel (first 3)':<22}: "
+                  f"[{joint_vel[0]:+7.3f}, {joint_vel[1]:+7.3f}, {joint_vel[2]:+7.3f}]")
+            print(f"  {'Last actions (first 3)':<22}: "
+                  f"[{self.last_actions[0]:+7.3f}, {self.last_actions[1]:+7.3f}, {self.last_actions[2]:+7.3f}]")
+            if self.obs_layout == "flat":
+                print(f"  {'Base lin vel':<22}: "
+                      f"[{base_lin_vel[0]:+7.3f}, {base_lin_vel[1]:+7.3f}, {base_lin_vel[2]:+7.3f}]")
+            elif self.obs_layout == "acc":
+                print(f"  {'Base lin acc':<22}: "
+                      f"[{base_lin_acc[0]:+7.3f}, {base_lin_acc[1]:+7.3f}, {base_lin_acc[2]:+7.3f}]")
+            print("  " + "-" * 52)
 
         return obs, obs_clean
 
