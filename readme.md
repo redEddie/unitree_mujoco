@@ -1,3 +1,16 @@
+Quick commands (sim + flat policy with Kalman)
+
+T1: 
+```
+cd ~/unitree_mujoco/simulate_python && python3 unitree_mujoco.py
+```
+T2: 
+```
+cd ~/unitree_mujoco/example/python && python3 policy_runner_flat.py --estimate kalman --duration 30 --interface lo
+```
+
+---
+
 ### Summary
 Implemented the motor command interface in MuJoCo to enable Go2 to walk correctly using the rsl_rl policy within the Unitree Mujoco environment.
 
